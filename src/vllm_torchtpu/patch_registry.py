@@ -91,6 +91,9 @@ PATCHES = (
     Patch("vllm_torchtpu:_patch_vllm_hybrid_kv_load_failure_recovery", _ENGINE),
     Patch("vllm_torchtpu:_patch_vllm_block_pool_lifo_free", _ACTIVE),
     Patch("vllm_torchtpu:_patch_vllm_same_step_prefix_hits", _ENGINE),
+    # Opt-in per-step scheduler trace (VLLM_TPU_STEP_TRACE_DIR); wraps the
+    # patched schedule() above, so it sees exactly what was scheduled.
+    Patch("vllm_torchtpu.core.step_trace:install", ("engine_core",)),
     Patch(
         "vllm_torchtpu.core.eagle_block_drop:patch_disable_eagle_block_drop",
         _ENGINE,
