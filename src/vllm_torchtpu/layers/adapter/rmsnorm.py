@@ -309,7 +309,9 @@ def _get_quant_moe_router_op(eps: float):
             return (
                 torch.empty_like(x),
                 *_quant_moe_fake(x, residual),
-                torch.empty((x.shape[0], gate.shape[0]), dtype=x.dtype, device=x.device),
+                torch.empty(
+                    (x.shape[0], gate.shape[0]), dtype=x.dtype, device=x.device
+                ),
             )
 
         op = pallas.jax_op(f"pallas::fused_add_rmsnorm_quant_moe_router_{tag}", fn)
@@ -507,7 +509,19 @@ def _get_norm_qkva_op(
             )
 
         # jax_op takes a fixed-length tuple return, not tuple[jax.Array, ...].
-        fn.__annotations__["return"] = tuple[(jax.Array,) * (7 if emit_q8 else 5)]
+        fn.__annotations__["return"] = (
+            tuple[
+                jax.Array,
+                jax.Array,
+                jax.Array,
+                jax.Array,
+                jax.Array,
+                jax.Array,
+                jax.Array,
+            ]
+            if emit_q8
+            else tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+        )
 
         def fake(x, residual, ln_w, w_q, w_s, qa_w, kva_w):
             rows = x.shape[0]
@@ -649,8 +663,8 @@ def arm_norm_qkva(model: torch.nn.Module) -> int:
         ln_in.register_buffer("_nq_w", qkv.weight.detach(), persistent=False)
         # The kernel reads the vectors as [1, n] rows. A 1-D vector's layout is
         # tiled by 1024, so reshaping it per call is a real relayout: 0.6 us
-        # each where XLA puts the result in HBM (16- and 32-row programs,
-        # vm-b9794158-e94e-45e4-9204). Rows built once here need none.
+        # each where XLA puts the result in HBM (16- and 32-row programs).
+        # Rows built once here need none.
         for name, t in (
             ("_nq_lnw", ln_in.weight),
             ("_nq_ws", qkv.weight_scale.float()),

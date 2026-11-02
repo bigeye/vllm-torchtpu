@@ -144,7 +144,10 @@ def rotated_fn(mesh, kind: str, places):
 
     def fn(x: jax.Array, rank: jax.Array) -> jax.Array:
         return sharded(
-            *(jax.device_put(a, NamedSharding(mesh, s)) for a, s in zip((x, rank), specs))
+            *(
+                jax.device_put(a, NamedSharding(mesh, s))
+                for a, s in zip((x, rank), specs)
+            )
         )
 
     return fn, specs, rows
@@ -206,7 +209,10 @@ def quantized_gather_fn(mesh, places, projections: int = 1):
         ):
             block = _rotated_gather(padded([q, rest], rows), rank, table, axis, ranks)
             return (
-                *(xla_quantized_matmul(block[:, :width], w_q, w_s) for w_q, w_s in weights),
+                *(
+                    xla_quantized_matmul(block[:, :width], w_q, w_s)
+                    for w_q, w_s in weights
+                ),
                 block[:, width : width + rest_width],
             )
         q_q, q_scale = quantize_tensor(q, weights[0][0].dtype)
@@ -252,7 +258,11 @@ def _quantized_gather_op(mesh, places, projections: int):
     if projections == 1:
 
         def fn(
-            q: jax.Array, rest: jax.Array, w_q: jax.Array, w_s: jax.Array, rank: jax.Array
+            q: jax.Array,
+            rest: jax.Array,
+            w_q: jax.Array,
+            w_s: jax.Array,
+            rank: jax.Array,
         ) -> tuple[jax.Array, jax.Array]:
             return run(q, rest, w_q, w_s, rank)
 
@@ -283,10 +293,7 @@ def _quantized_gather_op(mesh, places, projections: int):
     )
     op.register_fake(
         lambda q, rest, *operands: (
-            *(
-                q.new_empty((rows(q.shape[0]), w_q.shape[1]))
-                for w_q in operands[:-1:2]
-            ),
+            *(q.new_empty((rows(q.shape[0]), w_q.shape[1])) for w_q in operands[:-1:2]),
             rest.new_empty((rows(rest.shape[0]), rest.shape[1])),
         )
     )
@@ -372,25 +379,18 @@ def _fused_projection_weights(projection, x: torch.Tensor):
     weight in (k, n) layout, no bias, no activation prequantized upstream,
     bf16 rows. None otherwise."""
     from vllm_torchtpu.layers.adapter.linear_common import (
-        KEEP_VLLM_LAYOUT_ATTR,
         PREQUANT_ATTR,
+        is_xla_fp8_projection,
     )
 
-    weight = getattr(projection, "weight", None)
-    scale = getattr(projection, "weight_scale", None)
+    if not is_xla_fp8_projection(projection):
+        return None
+    weight, scale = projection.weight, projection.weight_scale
     if (
-        type(projection.quant_method).__name__ != "VllmFp8LinearMethodTPU"
-        or weight is None
-        or scale is None
-        or weight.dtype != torch.float8_e4m3fn
-        or weight.dim() != 2
-        or scale.dim() != 1
-        or scale.shape[0] != weight.shape[1]
+        scale.shape[0] != weight.shape[1]
         or weight.shape[0] != x.shape[-1]
         or x.dim() != 2
         or x.dtype != torch.bfloat16
-        or getattr(projection, "bias", None) is not None
-        or getattr(projection, KEEP_VLLM_LAYOUT_ATTR, False)
         or getattr(projection, PREQUANT_ATTR, None) is not None
     ):
         return None
@@ -696,24 +696,17 @@ def _rotated_places(mesh):
     from vllm_torchtpu.distributed.ep_mesh import ep_mesh_index
 
     if small_all_reduce_op._RANK is None:
-        reason = "the small collectives hold no rank buffer (TPU_SMALL_ALL_REDUCE off)"
-    elif int(mesh.size) != rotated_collectives.CORES:
-        reason = f"the mesh has {int(mesh.size)} cores, not {rotated_collectives.CORES}"
-    else:
-        try:
-            places = small_all_reduce_op._chip_places(mesh, ep_mesh_index())
-            rotated_collectives.Layout(places)
-        except (RuntimeError, ValueError) as e:
-            reason = str(e)
-        else:
-            logger.info(
-                "TPU_PREFILL_ROTATED_COLLECTIVES: o_proj's reduce-scatter and the "
-                "latents' all-gather run as rotated halving-doubling over %s",
-                places,
-            )
-            return places
-    logger.warning("TPU_PREFILL_ROTATED_COLLECTIVES: %s; XLA's collectives", reason)
-    return None
+        logger.warning(
+            "TPU_PREFILL_ROTATED_COLLECTIVES: the small collectives hold no rank "
+            "buffer (TPU_SMALL_ALL_REDUCE off); XLA's collectives"
+        )
+        return None
+    return small_all_reduce_op.rotated_places(
+        mesh,
+        ep_mesh_index(),
+        "TPU_PREFILL_ROTATED_COLLECTIVES",
+        "o_proj's reduce-scatter and the latents' all-gather (halving-doubling)",
+    )
 
 
 def _arm_quantized_gather(backbone) -> None:
@@ -770,10 +763,11 @@ def arm(model: torch.nn.Module, token_buckets: list[int]) -> bool:
     armed = []
     if reason is None:
         for runner in runners:
-            armed.append(arm_token_split_op(runner.routed_experts, slot))
-            if armed[-1] is None:
+            op = arm_token_split_op(runner.routed_experts, slot)
+            if op is None:
                 reason = "a MoE layer has no moe_tp_decode stage-A prefill kernel"
                 break
+            armed.append(op)
     if reason is None and len({id(mesh) for mesh, _, _ in armed}) != 1:
         reason = "the MoE layers' ops use different meshes"
     if reason is None:
